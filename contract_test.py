@@ -1,61 +1,90 @@
 #!/usr/bin/env python3
-"""Consumer-driven contract testing for API compatibility."""
-import sys, json, re
+"""contract_test - Design by contract: preconditions, postconditions, invariants."""
+import sys, functools
 
-class Contract:
-    def __init__(self, consumer, provider):
-        self.consumer,self.provider = consumer,provider
-        self.interactions = []
-    def add_interaction(self, description, request, expected_response):
-        self.interactions.append({"description":description,"request":request,"expected":expected_response})
+class ContractError(Exception):
+    pass
 
-class ContractVerifier:
-    def __init__(self): self.results = []
-    def verify(self, contract, provider_fn):
-        for interaction in contract.interactions:
-            actual = provider_fn(interaction["request"])
-            expected = interaction["expected"]
-            errors = self._compare(expected, actual)
-            passed = len(errors) == 0
-            self.results.append({"description":interaction["description"],"passed":passed,"errors":errors})
-        return all(r["passed"] for r in self.results)
-    def _compare(self, expected, actual, path="$"):
-        errors = []
-        if isinstance(expected, dict):
-            for key in expected:
-                if key not in actual: errors.append(f"{path}.{key}: missing")
-                else: errors.extend(self._compare(expected[key], actual[key], f"{path}.{key}"))
-        elif isinstance(expected, type):
-            if not isinstance(actual, expected): errors.append(f"{path}: expected {expected.__name__}, got {type(actual).__name__}")
-        elif expected != actual:
-            errors.append(f"{path}: expected {expected}, got {actual}")
-        return errors
+def requires(*conditions):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for cond in conditions:
+                if not cond(*args, **kwargs):
+                    raise ContractError(f"Precondition failed for {func.__name__}")
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
-class MockProvider:
-    def __init__(self): self.stubs = {}
-    def stub(self, method, path, response):
-        self.stubs[(method, path)] = response
-    def handle(self, request):
-        key = (request.get("method","GET"), request.get("path","/"))
-        return self.stubs.get(key, {"status":404,"body":{}})
+def ensures(condition):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            if not condition(result, *args, **kwargs):
+                raise ContractError(f"Postcondition failed for {func.__name__}")
+            return result
+        return wrapper
+    return decorator
 
-def main():
-    contract = Contract("frontend", "user-service")
-    contract.add_interaction("get user by id",
-        {"method":"GET","path":"/users/1"},
-        {"status":200,"body":{"id":int,"name":str,"email":str}})
-    contract.add_interaction("create user",
-        {"method":"POST","path":"/users"},
-        {"status":201,"body":{"id":int}})
-    mock = MockProvider()
-    mock.stub("GET","/users/1",{"status":200,"body":{"id":1,"name":"Alice","email":"alice@test.com"}})
-    mock.stub("POST","/users",{"status":201,"body":{"id":2}})
-    verifier = ContractVerifier()
-    passed = verifier.verify(contract, mock.handle)
-    print(f"  Contract verified: {passed}")
-    for r in verifier.results:
-        status = "PASS" if r["passed"] else "FAIL"
-        print(f"  [{status}] {r['description']}")
-        for e in r["errors"]: print(f"    - {e}")
+def invariant(check):
+    def decorator(cls):
+        orig_init = cls.__init__
+        def new_init(self, *args, **kwargs):
+            orig_init(self, *args, **kwargs)
+            if not check(self):
+                raise ContractError(f"Invariant violated after __init__")
+        cls.__init__ = new_init
+        for name in list(vars(cls)):
+            method = getattr(cls, name)
+            if callable(method) and not name.startswith("_"):
+                def make_wrapper(m):
+                    @functools.wraps(m)
+                    def wrapper(self, *args, **kwargs):
+                        result = m(self, *args, **kwargs)
+                        if not check(self):
+                            raise ContractError(f"Invariant violated after {m.__name__}")
+                        return result
+                    return wrapper
+                setattr(cls, name, make_wrapper(method))
+        return cls
+    return decorator
 
-if __name__ == "__main__": main()
+def test():
+    @requires(lambda x, y: y != 0)
+    @ensures(lambda result, x, y: abs(result * y - x) < 1e-9)
+    def safe_div(x, y):
+        return x / y
+
+    assert safe_div(10, 2) == 5.0
+    try:
+        safe_div(10, 0)
+        assert False
+    except ContractError:
+        pass
+
+    @invariant(lambda self: self.balance >= 0)
+    class Account:
+        def __init__(self, balance):
+            self.balance = balance
+        def deposit(self, amount):
+            self.balance += amount
+        def withdraw(self, amount):
+            self.balance -= amount
+
+    a = Account(100)
+    a.deposit(50)
+    assert a.balance == 150
+    try:
+        a.withdraw(200)
+        assert False
+    except ContractError:
+        pass
+
+    print("OK: contract_test")
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        test()
+    else:
+        print("Usage: contract_test.py test")

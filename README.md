@@ -1,9 +1,11 @@
-# Contract Testing Framework
+# contract-test
 
-Contract Testing Framework — zero-dependency Python implementation.
+Design by contract: preconditions, postconditions, invariants.
 
 ## Usage
 
 ```bash
-python3 contract_test.py
+python3 contract_test.py test
 ```
+
+Zero dependencies. Python 3.8+.
